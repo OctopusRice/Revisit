@@ -4,6 +4,7 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from detectron2.layers import ShapeSpec
 from detectron2.structures import Boxes, ImageList, Instances, pairwise_iou
@@ -18,12 +19,15 @@ from ..proposal_generator.proposal_utils import add_ground_truth_to_proposals
 from ..sampling import subsample_labels
 from .box_head import build_box_head
 from .fast_rcnn import FastRCNNOutputLayers, FastRCNNOutputs
+from .fast_rcnn_disentangled import FastRCNNRegressionOutputLayers, FastRCNNClassificationOutputLayers
 from .keypoint_head import build_keypoint_head
 from .mask_head import build_mask_head
 
-ROI_HEADS_REGISTRY = Registry("ROI_HEADS")
-ROI_HEADS_REGISTRY.__doc__ = """
-Registry for ROI heads in a generalized R-CNN model.
+from .deformation_head import Deformation
+
+TSD_HEADS_REGISTRY = Registry("TSD_HEADS")
+TSD_HEADS_REGISTRY.__doc__ = """
+Registry for TSD heads in a generalized R-CNN model.
 ROIHeads take feature maps and region proposals, and
 perform per-region computation.
 
@@ -34,12 +38,12 @@ The call is expected to return an :class:`ROIHeads`.
 logger = logging.getLogger(__name__)
 
 
-def build_roi_heads(cfg, input_shape):
+def build_tsd_heads(cfg, input_shape):
     """
     Build ROIHeads defined by `cfg.MODEL.ROI_HEADS.NAME`.
     """
     name = cfg.MODEL.ROI_HEADS.NAME
-    return ROI_HEADS_REGISTRY.get(name)(cfg, input_shape)
+    return TSD_HEADS_REGISTRY.get(name)(cfg, input_shape)
 
 
 def select_foreground_proposals(
@@ -119,9 +123,9 @@ def select_proposals_with_visible_keypoints(proposals: List[Instances]) -> List[
     return ret
 
 
-class ROIHeads(torch.nn.Module):
+class TSDHeads(torch.nn.Module):
     """
-    ROIHeads perform all per-region computation in an R-CNN.
+    TSDHeads perform all per-region computation in an R-CNN.
 
     It contains logic of cropping the regions, extract per-region features,
     and make per-region predictions.
@@ -130,7 +134,7 @@ class ROIHeads(torch.nn.Module):
     """
 
     def __init__(self, cfg, input_shape: Dict[str, ShapeSpec]):
-        super(ROIHeads, self).__init__()
+        super(TSDHeads, self).__init__()
 
         # fmt: off
         self.batch_size_per_image     = cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE
@@ -318,154 +322,8 @@ class ROIHeads(torch.nn.Module):
         raise NotImplementedError()
 
 
-@ROI_HEADS_REGISTRY.register()
-class Res5ROIHeads(ROIHeads):
-    """
-    The ROIHeads in a typical "C4" R-CNN model, where
-    the box and mask head share the cropping and
-    the per-region feature computation by a Res5 block.
-    """
-
-    def __init__(self, cfg, input_shape):
-        super().__init__(cfg, input_shape)
-
-        assert len(self.in_features) == 1
-
-        # fmt: off
-        pooler_resolution = cfg.MODEL.ROI_BOX_HEAD.POOLER_RESOLUTION
-        pooler_type       = cfg.MODEL.ROI_BOX_HEAD.POOLER_TYPE
-        pooler_scales     = (1.0 / input_shape[self.in_features[0]].stride, )
-        sampling_ratio    = cfg.MODEL.ROI_BOX_HEAD.POOLER_SAMPLING_RATIO
-        self.mask_on      = cfg.MODEL.MASK_ON
-        # fmt: on
-        assert not cfg.MODEL.KEYPOINT_ON
-
-        self.pooler = ROIPooler(
-            output_size=pooler_resolution,
-            scales=pooler_scales,
-            sampling_ratio=sampling_ratio,
-            pooler_type=pooler_type,
-        )
-
-        self.res5, out_channels = self._build_res5_block(cfg)
-        self.box_predictor = FastRCNNOutputLayers(
-            ShapeSpec(channels=out_channels, width=1, height=1),
-            self.num_classes,
-            self.cls_agnostic_bbox_reg,
-        )
-
-        if self.mask_on:
-            self.mask_head = build_mask_head(
-                cfg,
-                ShapeSpec(channels=out_channels, width=pooler_resolution, height=pooler_resolution),
-            )
-
-    def _build_res5_block(self, cfg):
-        # fmt: off
-        stage_channel_factor = 2 ** 3  # res5 is 8x res2
-        num_groups           = cfg.MODEL.RESNETS.NUM_GROUPS
-        width_per_group      = cfg.MODEL.RESNETS.WIDTH_PER_GROUP
-        bottleneck_channels  = num_groups * width_per_group * stage_channel_factor
-        out_channels         = cfg.MODEL.RESNETS.RES2_OUT_CHANNELS * stage_channel_factor
-        stride_in_1x1        = cfg.MODEL.RESNETS.STRIDE_IN_1X1
-        norm                 = cfg.MODEL.RESNETS.NORM
-        assert not cfg.MODEL.RESNETS.DEFORM_ON_PER_STAGE[-1], \
-            "Deformable conv is not yet supported in res5 head."
-        # fmt: on
-
-        blocks = make_stage(
-            BottleneckBlock,
-            3,
-            first_stride=2,
-            in_channels=out_channels // 2,
-            bottleneck_channels=bottleneck_channels,
-            out_channels=out_channels,
-            num_groups=num_groups,
-            norm=norm,
-            stride_in_1x1=stride_in_1x1,
-        )
-        return nn.Sequential(*blocks), out_channels
-
-    def _shared_roi_transform(self, features, boxes):
-        x = self.pooler(features, boxes)
-        return self.res5(x)
-
-    def forward(self, images, features, proposals, targets=None):
-        """
-        See :meth:`ROIHeads.forward`.
-        """
-        del images
-
-        if self.training:
-            assert targets
-            proposals = self.label_and_sample_proposals(proposals, targets)
-        del targets
-
-        proposal_boxes = [x.proposal_boxes for x in proposals]
-        box_features = self._shared_roi_transform(
-            [features[f] for f in self.in_features], proposal_boxes
-        )
-        feature_pooled = box_features.mean(dim=[2, 3])  # pooled to 1x1
-        pred_class_logits, pred_proposal_deltas = self.box_predictor(feature_pooled)
-        del feature_pooled
-
-        outputs = FastRCNNOutputs(
-            self.box2box_transform,
-            pred_class_logits,
-            pred_proposal_deltas,
-            proposals,
-            self.smooth_l1_beta,
-        )
-
-        if self.training:
-            del features
-            losses = outputs.losses()
-            if self.mask_on:
-                proposals, fg_selection_masks = select_foreground_proposals(
-                    proposals, self.num_classes
-                )
-                # Since the ROI feature transform is shared between boxes and masks,
-                # we don't need to recompute features. The mask loss is only defined
-                # on foreground proposals, so we need to select out the foreground
-                # features.
-                mask_features = box_features[torch.cat(fg_selection_masks, dim=0)]
-                del box_features
-                losses.update(self.mask_head(mask_features, proposals))
-            return [], losses
-        else:
-            pred_instances, _ = outputs.inference(
-                self.test_score_thresh, self.test_nms_thresh, self.test_detections_per_img
-            )
-            pred_instances = self.forward_with_given_boxes(features, pred_instances)
-            return pred_instances, {}
-
-    def forward_with_given_boxes(self, features, instances):
-        """
-        Use the given boxes in `instances` to produce other (non-box) per-ROI outputs.
-
-        Args:
-            features: same as in `forward()`
-            instances (list[Instances]): instances to predict other outputs. Expect the keys
-                "pred_boxes" and "pred_classes" to exist.
-
-        Returns:
-            instances (Instances):
-                the same `Instances` object, with extra
-                fields such as `pred_masks` or `pred_keypoints`.
-        """
-        assert not self.training
-        assert instances[0].has("pred_boxes") and instances[0].has("pred_classes")
-
-        if self.mask_on:
-            features = [features[f] for f in self.in_features]
-            x = self._shared_roi_transform(features, [x.pred_boxes for x in instances])
-            return self.mask_head(x, instances)
-        else:
-            return instances
-
-
-@ROI_HEADS_REGISTRY.register()
-class StandardROIHeads(ROIHeads):
+@TSD_HEADS_REGISTRY.register()
+class StandardTSDHeads(TSDHeads):
     """
     It's "standard" in a sense that there is no ROI transform sharing
     or feature sharing between tasks.
@@ -478,10 +336,12 @@ class StandardROIHeads(ROIHeads):
     """
 
     def __init__(self, cfg, input_shape):
-        super(StandardROIHeads, self).__init__(cfg, input_shape)
+        super(StandardTSDHeads, self).__init__(cfg, input_shape)
         self._init_box_head(cfg, input_shape)
         self._init_mask_head(cfg, input_shape)
         self._init_keypoint_head(cfg, input_shape)
+        self.GAMMA = cfg.GAMMA
+        self.K = cfg.K
 
     def _init_box_head(self, cfg, input_shape):
         # fmt: off
@@ -505,6 +365,9 @@ class StandardROIHeads(ROIHeads):
             sampling_ratio=sampling_ratio,
             pooler_type=pooler_type,
         )
+        self.deformation_head = Deformation(
+            cfg, ShapeSpec(channels=in_channels, height=pooler_resolution, width=pooler_resolution)
+        )
         # Here we split "box head" and "box predictor", which is mainly due to historical reasons.
         # They are used together so the "box predictor" layers should be part of the "box head".
         # New subclasses of ROIHeads do not need "box predictor"s.
@@ -514,7 +377,12 @@ class StandardROIHeads(ROIHeads):
         self.box_predictor = FastRCNNOutputLayers(
             self.box_head.output_shape, self.num_classes, self.cls_agnostic_bbox_reg
         )
-
+        self.regression_predictor = FastRCNNRegressionOutputLayers(
+            self.box_head.output_shape, self.num_classes, self.cls_agnostic_bbox_reg
+        )
+        self.classification_predictor = FastRCNNClassificationOutputLayers(
+            self.box_head.output_shape, self.num_classes, self.cls_agnostic_bbox_reg
+        )
     def _init_mask_head(self, cfg, input_shape):
         # fmt: off
         self.mask_on           = cfg.MODEL.MASK_ON
@@ -640,8 +508,43 @@ class StandardROIHeads(ROIHeads):
         """
         features = [features[f] for f in self.in_features]
         box_features = self.box_pooler(features, [x.proposal_boxes for x in proposals])
+
+        # Spatial disentanglement
+        deltaR, deltaC = self.deformation_head(box_features)
+
+        # Regression prediction
+        proposals_regr = [x.proposal_boxes.clone() for x in proposals]
+        startIdx = 0
+        endIdx = 0
+        for propIdx, val in enumerate([len(x) for x in proposals]):
+            startIdx = endIdx
+            endIdx += val
+            drw = self.GAMMA * deltaR[startIdx:endIdx][:, 0] * proposals[propIdx].image_size[1]  # width
+            drh = self.GAMMA * deltaR[startIdx:endIdx][:, 1] * proposals[propIdx].image_size[0]  # height
+            proposals_regr[propIdx].tensor[:, 0:4:2] += drw.unsqueeze(1).expand(endIdx - startIdx,2)
+            proposals_regr[propIdx].tensor[:, 1:4:2] += drh.unsqueeze(1).expand(endIdx - startIdx,2)
+
+        box_features = self.box_pooler(features, [x for x in proposals_regr])
         box_features = self.box_head(box_features)
-        pred_class_logits, pred_proposal_deltas = self.box_predictor(box_features)
+        _, pred_proposal_deltas = self.regression_predictor(box_features)
+        del box_features
+
+        # Calssification prediction
+        startIdx = 0
+        endIdx = 0
+        for propIdx, val in enumerate([len(x) for x in proposals]):
+            startIdx = endIdx
+            endIdx += val
+            deltaC[startIdx:endIdx][:, 0] = self.GAMMA * deltaC[startIdx:endIdx][:, 0] * proposals[propIdx].image_size[1]  # width
+            deltaC[startIdx:endIdx][:, 1] = self.GAMMA * deltaC[startIdx:endIdx][:, 1] * proposals[propIdx].image_size[0]  # height
+
+        grid = torch.rand((proposals, self.K, self.K))
+
+        for samplePoints in grid:
+            box_features += sum(samplePoints[0] + deltaC[0], samplePoints[1] + deltaC[1])
+        box_features /= (self.K * self.K)
+
+        pred_class_logits, _ = self.classification_predictor(box_features)
         del box_features
 
         outputs = FastRCNNOutputs(

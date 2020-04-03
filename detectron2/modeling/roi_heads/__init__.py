@@ -10,6 +10,10 @@ from .roi_heads import (
     build_roi_heads,
     select_foreground_proposals,
 )
+from .deformation_head import Deformation
+from .tsd import StandardTSDHeads
+
+
 from .rotated_fast_rcnn import RROIHeads
 
 from . import cascade_rcnn  # isort:skip
