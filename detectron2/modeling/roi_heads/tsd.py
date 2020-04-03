@@ -15,6 +15,7 @@ from ..backbone.resnet import BottleneckBlock, make_stage
 from ..box_regression import Box2BoxTransform
 from ..matcher import Matcher
 from ..poolers import ROIPooler
+from ..deformable_poolers import DeformableROIPooler
 from ..proposal_generator.proposal_utils import add_ground_truth_to_proposals
 from ..sampling import subsample_labels
 from .box_head import build_box_head
@@ -365,6 +366,12 @@ class StandardTSDHeads(TSDHeads):
             sampling_ratio=sampling_ratio,
             pooler_type=pooler_type,
         )
+        self.deformable_box_pooler = DeformableROIPooler(
+            output_size=pooler_resolution,
+            scales=pooler_scales,
+            sampling_ratio=sampling_ratio,
+            pooler_type=pooler_type,
+        )
         self.deformation_head = Deformation(
             cfg, ShapeSpec(channels=in_channels, height=pooler_resolution, width=pooler_resolution)
         )
@@ -519,10 +526,13 @@ class StandardTSDHeads(TSDHeads):
         for propIdx, val in enumerate([len(x) for x in proposals]):
             startIdx = endIdx
             endIdx += val
-            drw = self.GAMMA * deltaR[startIdx:endIdx][:, 0] * proposals[propIdx].image_size[1]  # width
-            drh = self.GAMMA * deltaR[startIdx:endIdx][:, 1] * proposals[propIdx].image_size[0]  # height
-            proposals_regr[propIdx].tensor[:, 0:4:2] += drw.unsqueeze(1).expand(endIdx - startIdx,2)
-            proposals_regr[propIdx].tensor[:, 1:4:2] += drh.unsqueeze(1).expand(endIdx - startIdx,2)
+            drw = self.GAMMA * deltaR[startIdx:endIdx][:, 0]  # width
+            drh = self.GAMMA * deltaR[startIdx:endIdx][:, 1]  # height
+            roiw = proposals_regr[propIdx].tensor[:, 2] - proposals_regr[propIdx].tensor[:, 0]
+            roih = proposals_regr[propIdx].tensor[:, 3] - proposals_regr[propIdx].tensor[:, 1]
+
+            proposals_regr[propIdx].tensor[:, 0:4:2] += (drw * roiw).unsqueeze(1).expand(endIdx - startIdx, 2)
+            proposals_regr[propIdx].tensor[:, 1:4:2] += (drh * roih).unsqueeze(1).expand(endIdx - startIdx, 2)
 
         box_features = self.box_pooler(features, [x for x in proposals_regr])
         box_features = self.box_head(box_features)
@@ -530,22 +540,10 @@ class StandardTSDHeads(TSDHeads):
         del box_features
 
         # Calssification prediction
-        startIdx = 0
-        endIdx = 0
-        for propIdx, val in enumerate([len(x) for x in proposals]):
-            startIdx = endIdx
-            endIdx += val
-            deltaC[startIdx:endIdx][:, 0] = self.GAMMA * deltaC[startIdx:endIdx][:, 0] * proposals[propIdx].image_size[1]  # width
-            deltaC[startIdx:endIdx][:, 1] = self.GAMMA * deltaC[startIdx:endIdx][:, 1] * proposals[propIdx].image_size[0]  # height
-
-        grid = torch.rand((proposals, self.K, self.K))
-
-        for samplePoints in grid:
-            box_features += sum(samplePoints[0] + deltaC[0], samplePoints[1] + deltaC[1])
-        box_features /= (self.K * self.K)
-
-        pred_class_logits, _ = self.classification_predictor(box_features)
-        del box_features
+        box_features2 = self.deformable_box_pooler(features, [x.proposal_boxes for x in proposals], deltaC * self.GAMMA)
+        box_features2 = self.box_head(box_features2)
+        pred_class_logits, _ = self.classification_predictor(box_features2)
+        del box_features2
 
         outputs = FastRCNNOutputs(
             self.box2box_transform,

@@ -6,6 +6,7 @@
 #include "box_iou_rotated/box_iou_rotated.h"
 #include "deformable/deform_conv.h"
 #include "nms_rotated/nms_rotated.h"
+#include "src/deform_pool_cuda.h"
 
 namespace detectron2 {
 
@@ -88,6 +89,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("roi_align_forward", &ROIAlign_forward, "ROIAlign_forward");
   m.def("roi_align_backward", &ROIAlign_backward, "ROIAlign_backward");
+
+  m.def("deform_psroi_pooling_cuda_forward", &deform_psroi_pooling_cuda_forward,
+        "deform psroi pooling forward(CUDA)");
+  m.def("deform_psroi_pooling_cuda_backward",
+        &deform_psroi_pooling_cuda_backward,
+        "deform psroi pooling backward(CUDA)");
 
   m.def(
       "roi_align_rotated_forward",

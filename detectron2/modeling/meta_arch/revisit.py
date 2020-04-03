@@ -170,7 +170,7 @@ class RevisitRCNN(nn.Module):
                 self.visualize_training(batched_inputs, proposals)
 
         # Progressive constraints
-        MarginLoss_regression = 0
+        marginLoss_regression = 0
         for b in range(len(proposals_disentangle)):
             for g in gt_instances[b].gt_boxes:
                 iouP1 = 0
@@ -186,17 +186,17 @@ class RevisitRCNN(nn.Module):
                         iouP1 += jaccard(pred_regression[b][idx], g)
                         numP1 += 1
                 if numP1 != 0 and numP2 != 0:
-                    MarginLoss_regression += abs((iouP2 / numP2) - (iouP1 / numP1) + self.MR)
+                    marginLoss_regression += abs((iouP2 / numP2) - (iouP1 / numP1) + self.MR)
 
 
-        MarginLoss_classification = abs(pred_class_logits - pred_disentangle_classification + self.MC)
-        MarginLoss_classification = MarginLoss_classification.sum() / len(MarginLoss_classification)
+        marginLoss_classification = abs(pred_class_logits - pred_disentangle_classification + self.MC)
+        marginLoss_classification = marginLoss_classification.sum() / len(marginLoss_classification)
 
         losses = {}
         losses.update(detector_losses)
         losses.update(proposal_losses)
         losses.update(detector_disentangle_losses)
-        losses.update({'MC': MarginLoss_classification, 'MR': MarginLoss_regression})
+        losses.update({'MC': marginLoss_classification, 'MR': marginLoss_regression})
         return losses
 
     def inference(self, batched_inputs, detected_instances=None, do_postprocess=True):

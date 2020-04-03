@@ -48,6 +48,7 @@ from .roi_heads import (
     build_roi_heads,
 )
 from .test_time_augmentation import DatasetMapperTTA, GeneralizedRCNNWithTTA
+from .deformable_poolers import DeformableROIPooler
 
 _EXCLUDE = {"torch", "ShapeSpec"}
 __all__ = [k for k in globals().keys() if k not in _EXCLUDE and not k.startswith("_")]
