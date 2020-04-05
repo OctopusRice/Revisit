@@ -7,6 +7,9 @@ from torch import nn
 from detectron2.structures import ImageList
 from detectron2.utils.events import get_event_storage
 from detectron2.utils.logger import log_first_n
+from detectron2.structures.boxes import Boxes, matched_boxlist_iou
+from detectron2.modeling.box_regression import Box2BoxTransform
+
 
 from ..backbone import build_backbone
 from ..postprocessing import detector_postprocess
@@ -14,43 +17,9 @@ from ..proposal_generator import build_proposal_generator
 from ..roi_heads import build_roi_heads, StandardTSDHeads
 from .build import META_ARCH_REGISTRY
 
+
 __all__ = ["RevisitRCNN", "DisentangleRegressionNetwork", "DisentangleClassificationNetwork"]
 
-
-def intersect(box_a, box_b):
-    """ We resize both tensors to [A,B,2] without new malloc:
-    [A,2] -> [A,1,2] -> [A,B,2]
-    [B,2] -> [1,B,2] -> [A,B,2]
-    Then we compute the area of intersect between box_a and box_b.
-    Args:
-      box_a: (tensor) bounding boxes, Shape: [A,4].
-      box_b: (tensor) bounding boxes, Shape: [B,4].
-    Return:
-      (tensor) intersection area, Shape: [A,B].
-    """
-    max_xy = torch.min(box_a[2:], box_b[2:])
-    min_xy = torch.max(box_a[:2], box_b[:2])
-    inter = torch.clamp((max_xy - min_xy), min=0)
-    return inter[0] * inter[1]
-
-
-def jaccard(box_a, box_b):
-    """Compute the jaccard overlap of two sets of boxes.  The jaccard overlap
-    is simply the intersection over union of two boxes.  Here we operate on
-    ground truth boxes and default boxes.
-    E.g.:
-        A ∩ B / A ∪ B = A ∩ B / (area(A) + area(B) - A ∩ B)
-    Args:
-        box_a: (tensor) Ground truth bounding boxes, Shape: [num_objects,4]
-        box_b: (tensor) Prior boxes from priorbox layers, Shape: [num_priors,4]
-    Return:
-        jaccard overlap: (tensor) Shape: [box_a.size(0), box_b.size(0)]
-    """
-    inter = intersect(box_a, box_b)
-    area_a = ((box_a[2] - box_a[0]) * (box_a[3] - box_a[1]))
-    area_b = ((box_b[2] - box_b[0]) * (box_b[3] - box_b[1]))
-    union = area_a + area_b - inter
-    return inter / 1.0 /union # [A,B]
 
 @META_ARCH_REGISTRY.register()
 class RevisitRCNN(nn.Module):
@@ -70,7 +39,7 @@ class RevisitRCNN(nn.Module):
         self.backbone = build_backbone(cfg)
         self.proposal_generator = build_proposal_generator(cfg, self.backbone.output_shape())
         self.tsd = StandardTSDHeads(cfg, self.backbone.output_shape())
-        self.roi_heads = build_roi_heads(cfg, self.backbone.output_shape())
+        # self.roi_heads = build_roi_heads(cfg, self.backbone.output_shape())
         self.vis_period = cfg.VIS_PERIOD
         self.input_format = cfg.INPUT.FORMAT
         self.MC = cfg.MC
@@ -81,6 +50,7 @@ class RevisitRCNN(nn.Module):
         pixel_std = torch.Tensor(cfg.MODEL.PIXEL_STD).to(self.device).view(num_channels, 1, 1)
         self.normalizer = lambda x: (x - pixel_mean) / pixel_std
         self.to(self.device)
+        self.box2box_transform = Box2BoxTransform(weights=cfg.MODEL.ROI_BOX_HEAD.BBOX_REG_WEIGHTS)
 
     def visualize_training(self, batched_inputs, proposals):
         """
@@ -160,9 +130,10 @@ class RevisitRCNN(nn.Module):
         features = self.backbone(images.tensor)
 
         proposals, proposal_losses = self.proposal_generator(images, features, gt_instances)
-        _, detector_disentangle_losses, pred_disentangle_classification, pred_disentangle_regression, proposals_disentangle = \
-            self.tsd(images, features, proposals, gt_instances)
-        _, detector_losses, pred_class_logits, pred_regression, proposals_ori = self.roi_heads(images, features, proposals, gt_instances)
+        _, outputs_classic, outputs = self.tsd(images, features, proposals, gt_instances)
+
+        detector_classic_losses = outputs_classic.losses()
+        detector_losses = outputs.losses()
 
         if self.vis_period > 0:
             storage = get_event_storage()
@@ -170,33 +141,33 @@ class RevisitRCNN(nn.Module):
                 self.visualize_training(batched_inputs, proposals)
 
         # Progressive constraints
-        marginLoss_regression = 0
-        for b in range(len(proposals_disentangle)):
-            for g in gt_instances[b].gt_boxes:
-                iouP1 = 0
-                iouP2 = 0
-                numP1 = 0
-                numP2 = 0
-                for idx, p1 in enumerate(proposals_disentangle[b].gt_boxes):
-                    if torch.all(torch.eq(p1, g)):
-                        iouP1 += jaccard(pred_disentangle_regression[b][idx], g)
-                        numP1 += 1
-                for idx, p2 in enumerate(proposals_ori[b].gt_boxes):
-                    if torch.all(torch.eq(p2, g)):
-                        iouP1 += jaccard(pred_regression[b][idx], g)
-                        numP1 += 1
-                if numP1 != 0 and numP2 != 0:
-                    marginLoss_regression += abs((iouP2 / numP2) - (iouP1 / numP1) + self.MR)
+        margin_regression_losses = 0
+        predict_boxes_classic = outputs_classic.predict_boxes_for_gt_classes()
+        predict_boxes = outputs.predict_boxes_for_gt_classes()
 
+        idx = -1
+        endIdx = 0
+        ind = outputs.gt_classes != (outputs.pred_proposal_deltas.size(1) / 4)
+        for pbc, pb in zip(predict_boxes_classic, predict_boxes):
+            idx += 1
+            startIdx = endIdx
+            endIdx += outputs.num_preds_per_image[idx]
+            iind = ind[startIdx:endIdx]
+            tmp = matched_boxlist_iou(Boxes(pbc[iind]), outputs.gt_boxes[startIdx:endIdx][iind])
+            tmp -= matched_boxlist_iou(Boxes(pb[iind]), outputs.gt_boxes[startIdx:endIdx][iind])
+            tmp += self.MR
+            margin_regression_losses += abs(tmp).sum()
 
-        marginLoss_classification = abs(pred_class_logits - pred_disentangle_classification + self.MC)
-        marginLoss_classification = marginLoss_classification.sum() / len(marginLoss_classification)
+        margin_classfication_losses = 0
+        for ppc, pc in zip(outputs_classic.predict_probs(), outputs.predict_probs()):
+            margin_classfication_losses += abs(ppc - pc + self.MC).sum()
+        margin_classfication_losses /= len(outputs.gt_classes)
 
         losses = {}
+        losses.update(detector_classic_losses)
         losses.update(detector_losses)
         losses.update(proposal_losses)
-        losses.update(detector_disentangle_losses)
-        losses.update({'MC': marginLoss_classification, 'MR': marginLoss_regression})
+        losses.update({'MC': margin_classfication_losses, 'MR': margin_regression_losses})
         return losses
 
     def inference(self, batched_inputs, detected_instances=None, do_postprocess=True):
@@ -228,7 +199,8 @@ class RevisitRCNN(nn.Module):
                 assert "proposals" in batched_inputs[0]
                 proposals = [x["proposals"].to(self.device) for x in batched_inputs]
 
-            results, _ = self.roi_heads(images, features, proposals, None)
+            results, _ = self.tsd(images, features, proposals, None)
+            #  results, _ = self.roi_heads(images, features, proposals, None)
         else:
             detected_instances = [x.to(self.device) for x in detected_instances]
             results = self.roi_heads.forward_with_given_boxes(features, detected_instances)
