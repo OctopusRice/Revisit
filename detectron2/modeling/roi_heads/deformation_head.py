@@ -44,19 +44,19 @@ class Deformation(nn.Module):
         self.fcs_regr = []
         self.fcs_cls  = []
         self.fc_shared = Linear(np.prod(self._output_size_regr), fc_dim_regr[0])
-        self.add_module("fc{}".format(1), self.fc_shared)
         self._output_size_regr = fc_dim_regr[0]
         self._output_size_cls  = fc_dim_cls[0]
         for k in range(num_fc - 1):
             fc_regr = Linear(np.prod(self._output_size_regr), fc_dim_regr[k+1])
             fc_cls = Linear(np.prod(self._output_size_cls), fc_dim_cls[k+1])
-            self.add_module("fc{}".format(2 * k + 2), fc_regr)
-            self.add_module("fc{}".format(2 * k + 3), fc_cls)
+            self.add_module("fc_regr{}".format(k + 1), fc_regr)
+            self.add_module("fc_cls{}".format(k + 1), fc_cls)
             self.fcs_regr.append(fc_regr)
             self.fcs_cls.append(fc_cls)
             self._output_size_regr = fc_dim_regr[k+1]
             self._output_size_cls  = fc_dim_cls[k+1]
 
+        weight_init.c2_xavier_fill(self.fc_shared)
         for layer in self.fcs_regr:
             weight_init.c2_xavier_fill(layer)
         for layer in self.fcs_cls:
@@ -64,14 +64,14 @@ class Deformation(nn.Module):
 
     def forward(self, x):
         if len(self.fcs_regr and self.fcs_cls):
+
             if x.dim() > 2:
                 x = torch.flatten(x, start_dim=1)
-            x = F.tanh(self.fc_shared(x))
-            y = x.clone()
-            for layer in self.fcs_regr:
-                x = F.tanh(layer(x))
-            for layer in self.fcs_cls:
-                y = F.tanh(layer(y))
+            shared = F.relu(self.fc_shared(x))
+            x = F.relu(self.fcs_regr[0](shared))
+            x = self.fcs_regr[1](x)
+            y = F.relu(self.fcs_cls[0](shared))
+            y = self.fcs_cls[1](y)
         return x, y
 
     @property

@@ -578,13 +578,13 @@ class StandardROIHeads(ROIHeads):
         del targets
 
         if self.training:
-            losses, pred_class_logits, pred_proposal_deltas, proposals = self._forward_box(features, proposals)
+            losses = self._forward_box(features, proposals)
             # Usually the original proposals used by the box head are used by the mask, keypoint
             # heads. But when `self.train_on_pred_boxes is True`, proposals will contain boxes
             # predicted by the box head.
             losses.update(self._forward_mask(features, proposals))
             losses.update(self._forward_keypoint(features, proposals))
-            return proposals, losses, pred_class_logits, pred_proposal_deltas, proposals
+            return proposals, losses
         else:
             pred_instances = self._forward_box(features, proposals)
             # During inference cascaded prediction is used: the mask and keypoints heads are only
@@ -658,7 +658,7 @@ class StandardROIHeads(ROIHeads):
                     for proposals_per_image, pred_boxes_per_image in zip(proposals, pred_boxes):
                         proposals_per_image.proposal_boxes = Boxes(pred_boxes_per_image)
 
-            return outputs.losses(), pred_class_logits, outputs.predict_boxes_for_gt_classes(), proposals
+            return outputs.losses()
         else:
             pred_instances, _ = outputs.inference(
                 self.test_score_thresh, self.test_nms_thresh, self.test_detections_per_img

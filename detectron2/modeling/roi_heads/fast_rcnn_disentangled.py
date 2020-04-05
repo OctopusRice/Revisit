@@ -396,21 +396,17 @@ class FastRCNNRegressionOutputLayers(nn.Module):
         input_size = input_shape.channels * (input_shape.width or 1) * (input_shape.height or 1)
         # The prediction layer for num_classes foreground classes and one background class
         # (hence + 1)
-        self.cls_score = Linear(input_size, num_classes + 1)
         num_bbox_reg_classes = 1 if cls_agnostic_bbox_reg else num_classes
         self.bbox_pred = Linear(input_size, num_bbox_reg_classes * box_dim)
 
-        nn.init.normal_(self.cls_score.weight, std=0.01)
         nn.init.normal_(self.bbox_pred.weight, std=0.001)
-        for l in [self.cls_score, self.bbox_pred]:
-            nn.init.constant_(l.bias, 0)
+        nn.init.constant_(self.bbox_pred.bias, 0)
 
     def forward(self, x):
         if x.dim() > 2:
             x = torch.flatten(x, start_dim=1)
-        scores = self.cls_score(x)
         proposal_deltas = self.bbox_pred(x)
-        return scores, proposal_deltas
+        return proposal_deltas
 
 
 class FastRCNNClassificationOutputLayers(nn.Module):
@@ -436,17 +432,12 @@ class FastRCNNClassificationOutputLayers(nn.Module):
         # The prediction layer for num_classes foreground classes and one background class
         # (hence + 1)
         self.cls_score = Linear(input_size, num_classes + 1)
-        num_bbox_reg_classes = 1 if cls_agnostic_bbox_reg else num_classes
-        self.bbox_pred = Linear(input_size, num_bbox_reg_classes * box_dim)
 
         nn.init.normal_(self.cls_score.weight, std=0.01)
-        nn.init.normal_(self.bbox_pred.weight, std=0.001)
-        for l in [self.cls_score, self.bbox_pred]:
-            nn.init.constant_(l.bias, 0)
+        nn.init.constant_(self.cls_score.bias, 0)
 
     def forward(self, x):
         if x.dim() > 2:
             x = torch.flatten(x, start_dim=1)
         scores = self.cls_score(x)
-        proposal_deltas = self.bbox_pred(x)
-        return scores, proposal_deltas
+        return scores

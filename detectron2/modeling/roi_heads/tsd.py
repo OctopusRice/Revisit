@@ -453,13 +453,13 @@ class StandardTSDHeads(TSDHeads):
         del targets
 
         if self.training:
-            losses, pred_class_logits, pred_proposal_deltas, proposals = self._forward_box(features, proposals)
+            outputs_classic, outputs = self._forward_box(features, proposals)
             # Usually the original proposals used by the box head are used by the mask, keypoint
             # heads. But when `self.train_on_pred_boxes is True`, proposals will contain boxes
             # predicted by the box head.
-            losses.update(self._forward_mask(features, proposals))
-            losses.update(self._forward_keypoint(features, proposals))
-            return proposals, losses, pred_class_logits, pred_proposal_deltas, proposals
+            # losses.update(self._forward_mask(features, proposals))
+            # losses.update(self._forward_keypoint(features, proposals))
+            return proposals, outputs_classic, outputs
         else:
             pred_instances = self._forward_box(features, proposals)
             # During inference cascaded prediction is used: the mask and keypoints heads are only
@@ -519,9 +519,21 @@ class StandardTSDHeads(TSDHeads):
         # Spatial disentanglement
         deltaR, deltaC = self.deformation_head(box_features)
 
+        # Classic head
+        box_features = self.box_head(box_features)
+        pred_class_logits_classic, pred_proposal_deltas_classic = self.box_predictor(box_features)
+        del box_features
+
+        outputs_classic = FastRCNNOutputs(
+            self.box2box_transform,
+            pred_class_logits_classic,
+            pred_proposal_deltas_classic,
+            proposals,
+            self.smooth_l1_beta,
+        )
+
         # Regression prediction
         proposals_regr = [x.proposal_boxes.clone() for x in proposals]
-        startIdx = 0
         endIdx = 0
         for propIdx, val in enumerate([len(x) for x in proposals]):
             startIdx = endIdx
@@ -536,13 +548,13 @@ class StandardTSDHeads(TSDHeads):
 
         box_features = self.box_pooler(features, [x for x in proposals_regr])
         box_features = self.box_head(box_features)
-        _, pred_proposal_deltas = self.regression_predictor(box_features)
+        pred_proposal_deltas = self.regression_predictor(box_features)
         del box_features
 
         # Calssification prediction
         box_features2 = self.deformable_box_pooler(features, [x.proposal_boxes for x in proposals], deltaC * self.GAMMA)
         box_features2 = self.box_head(box_features2)
-        pred_class_logits, _ = self.classification_predictor(box_features2)
+        pred_class_logits = self.classification_predictor(box_features2)
         del box_features2
 
         outputs = FastRCNNOutputs(
@@ -559,7 +571,7 @@ class StandardTSDHeads(TSDHeads):
                     for proposals_per_image, pred_boxes_per_image in zip(proposals, pred_boxes):
                         proposals_per_image.proposal_boxes = Boxes(pred_boxes_per_image)
 
-            return outputs.losses(), pred_class_logits, outputs.predict_boxes_for_gt_classes(), proposals
+            return outputs_classic, outputs
         else:
             pred_instances, _ = outputs.inference(
                 self.test_score_thresh, self.test_nms_thresh, self.test_detections_per_img
