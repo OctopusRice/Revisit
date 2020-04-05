@@ -205,11 +205,12 @@ class DeformableROIPooler(nn.Module):
         )
 
         for level, (x_level, pooler) in enumerate(zip(x, self.level_poolers)):
-            inds = torch.nonzero(level_assignments == level).squeeze(1)
-            pooler_fmt_boxes_level = pooler_fmt_boxes[inds]
-            delta_level = delta[inds]
-            if delta_level.size(0) != 0:
+            # inds = torch.nonzero(level_assignments == level).squeeze(1)
+            inds = level_assignments == level
+            if inds.any():
+                pooler_fmt_boxes_level = pooler_fmt_boxes[inds, :]
+                delta_level = delta[inds, :]
                 delta_level = delta_level.view(delta_level.size(0), 2, output_size, output_size)
-            output[inds] = pooler(x_level, pooler_fmt_boxes_level, delta_level)
+                output[inds] = pooler(x_level, pooler_fmt_boxes_level, delta_level)
 
         return output
