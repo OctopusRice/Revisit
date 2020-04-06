@@ -134,6 +134,8 @@ class RevisitRCNN(nn.Module):
 
         detector_classic_losses = outputs_classic.losses()
         detector_losses = outputs.losses()
+        detector_classic_losses['loss_cls_classic'] = detector_classic_losses.pop('loss_cls')
+        detector_classic_losses['loss_box_reg_classic'] = detector_classic_losses.pop('loss_box_reg')
 
         if self.vis_period > 0:
             storage = get_event_storage()
