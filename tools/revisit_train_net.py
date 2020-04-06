@@ -122,8 +122,8 @@ def setup(args):
     cfg.MODEL.META_ARCHITECTURE = "RevisitRCNN"
     cfg.GAMMA = 0.1
     cfg.K = 7
-    cfg.MR = 0.01
-    cfg.MC = 0.01
+    cfg.MR = 0.2
+    cfg.MC = 0.2
 
     cfg.freeze()
     default_setup(cfg, args)
