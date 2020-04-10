@@ -16,7 +16,7 @@ from ..postprocessing import detector_postprocess
 from ..proposal_generator import build_proposal_generator
 from ..roi_heads import build_roi_heads, StandardTSDHeads
 from .build import META_ARCH_REGISTRY
-
+import torch.nn.functional as F
 
 __all__ = ["RevisitRCNN", "DisentangleRegressionNetwork", "DisentangleClassificationNetwork"]
 
@@ -155,21 +155,22 @@ class RevisitRCNN(nn.Module):
             startIdx = endIdx
             endIdx += outputs.num_preds_per_image[idx]
             iind = ind[startIdx:endIdx]
-            tmp = matched_boxlist_iou(Boxes(pbc[iind]), outputs.gt_boxes[startIdx:endIdx][iind])
-            tmp -= matched_boxlist_iou(Boxes(pb[iind]), outputs.gt_boxes[startIdx:endIdx][iind])
-            tmp += self.MR
-            margin_regression_losses += abs(tmp).sum()
+            margin_regression_losses += F.relu(self.MR -
+                                               abs(matched_boxlist_iou(Boxes(pbc[iind]), outputs.gt_boxes[startIdx:endIdx][iind]) -
+                                               matched_boxlist_iou(Boxes(pb[iind]), outputs.gt_boxes[startIdx:endIdx][iind]))
+                                               ).mean()
+        margin_regression_losses = margin_regression_losses / len(predict_boxes)
 
-        margin_classfication_losses = 0
+        margin_classification_losses = 0
         for ppc, pc in zip(outputs_classic.predict_probs(), outputs.predict_probs()):
-            margin_classfication_losses += abs(ppc - pc + self.MC).sum()
-        margin_classfication_losses /= len(outputs.gt_classes)
+            margin_classification_losses += F.relu(self.MC - (abs(ppc - pc)).sum(1)).mean()
+        margin_classification_losses = margin_classification_losses / len(outputs.predict_probs())
 
         losses = {}
         losses.update(detector_classic_losses)
         losses.update(detector_losses)
         losses.update(proposal_losses)
-        losses.update({'MC': margin_classfication_losses, 'MR': margin_regression_losses})
+        losses.update({'loss_margin_classification': margin_classification_losses, 'loss_margin_regression': margin_regression_losses})
         return losses
 
     def inference(self, batched_inputs, detected_instances=None, do_postprocess=True):
