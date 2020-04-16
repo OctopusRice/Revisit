@@ -36,6 +36,7 @@ CUDA 10.0 \
 CUDNN 7.6.3
 
 ## Results
+![Results](./results.jpeg)
 
 ## Installation
 

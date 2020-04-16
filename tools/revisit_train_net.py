@@ -118,7 +118,7 @@ def setup(args):
     cfg = get_cfg()
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
-    cfg.DATASETS.TEST = ("voc_2012_test",)
+    # cfg.DATASETS.TEST = ("voc_2012_test",)
     cfg.OUTPUT_DIR = './myRevisitOuput'
     cfg.MODEL.META_ARCHITECTURE = "RevisitRCNN"
     cfg.GAMMA = 0.1
